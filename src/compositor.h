@@ -7,6 +7,11 @@
 #include <xcb/composite.h>
 #include <xcb/damage.h>
 
+struct __GLXcontextRec;
+typedef struct __GLXcontextRec *GLXContext;
+typedef unsigned long int XID;
+typedef XID GLXWindow;
+
 namespace Backend{
 class X11Backend;
 };
@@ -192,6 +197,9 @@ public:
 	const Backend::X11Backend *pbackend;
 	//X11Background *pbackground;
 	xcb_window_t overlay;
+	xcb_window_t glcontextwin;
+	GLXContext context;
+	GLXWindow glxwindow;
 protected:
 	sint compEventOffset;
 	sint compErrorOffset;
