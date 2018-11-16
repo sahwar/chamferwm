@@ -5,10 +5,10 @@
 #include "compositor.h"
 
 //only reason to have these is the interoperation with GL for EXT_texture_from_pixmap
-#include <GL/glx.h>
-#include <GL/gl.h>
-//#include <GL/glew.h>
-//#include <GL/glxew.h>
+//#include <GL/glx.h>
+//#include <GL/gl.h>
+#include "glad/gl.h"
+#include "glad/glx.h"
 
 #include <set>
 #include <algorithm>
@@ -218,7 +218,8 @@ void CompositorInterface::InitializeRenderEngine(){
 		"VK_KHR_surface",
 		"VK_KHR_xcb_surface",
 		"VK_KHR_get_physical_device_properties2",
-		VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME
+		VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+		VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME
 	};
 	DebugPrintf(stdout,"Enumerating required extensions\n");
 	uint extFound = 0;
@@ -368,7 +369,13 @@ void CompositorInterface::InitializeRenderEngine(){
 	vkEnumerateDeviceExtensionProperties(physicalDev,0,&devExtCount,pdevExtProps);
 
 	//device extensions
-	const char *pdevExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+	const char *pdevExtensions[] = {
+		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+		VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+		VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
+		VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+		VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME
+	};
 	DebugPrintf(stdout,"Enumerating required device extensions\n");
 	uint devExtFound = 0;
 	for(uint i = 0; i < devExtCount; ++i)
@@ -1051,7 +1058,7 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 
 			memcpy(pdata,pchpixels,rect.w*rect.h*4);
 			if(pimageReply->depth != 32)
-				for(uint i = 0; i < rect.w*rect.h; ++i)
+				for(uint i = 0, n = rect.w*rect.h; i < n; ++i)
 					pdata[4*i+3] = 255;
 			fullRegionUpdate = false;
 			
@@ -1198,6 +1205,11 @@ void X11Compositor::Start(){
 
 	InitializeRenderEngine();
 
+	sint glxver = gladLoaderLoadGLX(pbackend->pdisplay,pbackend->defaultScreen);
+	if(glxver == 0)
+		throw Exception("Unable to load GLX.\n");
+	DebugPrintf(stdout,"Loaded GLX %d.%d\n",GLAD_VERSION_MAJOR(glxver),GLAD_VERSION_MINOR(glxver));
+
 	// Initialize GL interop, setup window to get the context
 	int visualAttributes[] = { 
 		GLX_X_RENDERABLE,True,
@@ -1236,10 +1248,27 @@ void X11Compositor::Start(){
 	if(!glXMakeContextCurrent(pbackend->pdisplay,glxwindow,glxwindow,context))
 		throw Exception("Failed to set current GLX context.\n");
 	
-	/*if(glewInit() != GLEW_OK)
-		throw Exception("glewInit() failed.\n");
-	if(!GLX_EXT_texture_from_pixmap)
-		throw Exception("GLX_EXT_texture_from_pixmap not available.\n");*/
+	sint glver = gladLoaderLoadGL();
+	if(glver == 0)
+		throw Exception("Unable to load GL.\n");
+	DebugPrintf(stdout,"Loaded GL %d.%d\n",GLAD_VERSION_MAJOR(glver),GLAD_VERSION_MINOR(glver));
+	
+	//if(!gladLoadGLX(pbackend->pdisplay,pbackend->defaultScreen))
+		//throw Exception("Failed to load GLX extensions.\n");
+	//if(!gladLoadGL())
+		//throw Exception("Failed to load GL extension.\n");
+	
+	DebugPrintf(stdout,"Checking GL(X) extensions\n");
+	if(GLAD_GLX_EXT_texture_from_pixmap)
+		printf("EXT_texture_from_pixmap\n");
+	if(GLAD_GL_EXT_memory_object)
+		printf("EXT_memory_object\n");
+	if(GLAD_GL_EXT_memory_object_fd)
+		printf("EXT_memory_object_fd\n");
+	if(GLAD_GL_EXT_semaphore)
+		printf("EXT_semaphore\n");
+	if(GLAD_GL_EXT_semaphore_fd)
+		printf("EXT_semaphore_fd\n");
 	
 	DebugPrintf(stdout,"GL interop initialized.\n");
 	printf("* %s, OpenGL %s\n",glGetString(GL_RENDERER),glGetString(GL_VERSION));
@@ -1253,6 +1282,8 @@ void X11Compositor::Stop(){
 	xcb_destroy_window(pbackend->pcon,glcontextwin);
 
 	glXDestroyContext(pbackend->pdisplay,context);
+
+	gladLoaderUnloadGLX();
 	
 	DestroyRenderEngine();
 
