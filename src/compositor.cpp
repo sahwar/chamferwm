@@ -215,7 +215,6 @@ void CompositorInterface::InitializeRenderEngine(){
 
 	const char *pextensions[] = {
 		VK_EXT_DEBUG_REPORT_EXTENSION_NAME,
-		//"VK_KHR_swapchain",
 		"VK_KHR_surface",
 		"VK_KHR_xcb_surface",
 		"VK_KHR_get_physical_device_properties2",
@@ -529,6 +528,8 @@ void CompositorInterface::InitializeRenderEngine(){
 				throw Exception("Failed to create a semaphore.");
 	}
 
+	DebugPrintf(stdout,"Initialized swap chain and semaphores.\n");
+
 	//sampler
 	VkSamplerCreateInfo samplerCreateInfo = {};
 	samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -579,6 +580,58 @@ void CompositorInterface::InitializeRenderEngine(){
 	shaders.reserve(1024);
 
 	pipelines.reserve(1024);
+}
+
+void CompositorInterface::InitializeGLInterop(){
+	if(!(vkGetMemoryFdKHR = (PFN_vkGetMemoryFdKHR)vkGetInstanceProcAddr(instance,"vkGetMemoryFdKHR")) ||
+		!(vkGetSemaphoreFdKHR = (PFN_vkGetSemaphoreFdKHR)vkGetInstanceProcAddr(instance,"vkGetSemaphoreFdKHR")))
+		throw Exception("Unable to retrieve Vulkan extension procedure addresses.");
+	
+	sint glver = gladLoaderLoadGL();
+	if(glver == 0)
+		throw Exception("Unable to load GL.");
+	DebugPrintf(stdout,"Loaded GL %d.%d\n",GLAD_VERSION_MAJOR(glver),GLAD_VERSION_MINOR(glver));
+
+	DebugPrintf(stdout,"Checking GL(X) extensions\n");
+	if(GLAD_GLX_EXT_texture_from_pixmap)
+		printf("EXT_texture_from_pixmap\n");
+	if(GLAD_GL_EXT_memory_object)
+		printf("EXT_memory_object\n");
+	if(GLAD_GL_EXT_memory_object_fd)
+		printf("EXT_memory_object_fd\n");
+	if(GLAD_GL_EXT_semaphore)
+		printf("EXT_semaphore\n");
+	if(GLAD_GL_EXT_semaphore_fd)
+		printf("EXT_semaphore_fd\n");
+
+	pglSemaphore = new uint[swapChainImageCount][GL_SEMAPHORE_INDEX_COUNT];
+
+	for(uint i = 0; i < swapChainImageCount; ++i){
+		glGenSemaphoresEXT(GL_SEMAPHORE_INDEX_COUNT,pglSemaphore[i]);
+
+		VkSemaphoreGetFdInfoKHR semaphoreFdInfo = {};
+		semaphoreFdInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+		semaphoreFdInfo.pNext = 0;
+		semaphoreFdInfo.semaphore = psemaphore[i][SEMAPHORE_INDEX_GL_READY];
+		semaphoreFdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+		sint semaphorefd;
+		vkGetSemaphoreFdKHR(logicalDev,&semaphoreFdInfo,&semaphorefd);
+		glImportSemaphoreFdEXT(pglSemaphore[i][GL_SEMAPHORE_INDEX_READY],GL_HANDLE_TYPE_OPAQUE_FD_EXT,semaphorefd);
+		//
+		semaphoreFdInfo.semaphore = psemaphore[i][SEMAPHORE_INDEX_GL_FINISHED];
+
+		vkGetSemaphoreFdKHR(logicalDev,&semaphoreFdInfo,&semaphorefd);
+		glImportSemaphoreFdEXT(pglSemaphore[i][GL_SEMAPHORE_INDEX_FINISHED],GL_HANDLE_TYPE_OPAQUE_FD_EXT,semaphorefd);
+	}
+		
+}
+
+void CompositorInterface::DestroyGLInterop(){
+	//
+	for(uint i = 0; i < swapChainImageCount; ++i)
+		glDeleteSemaphoresEXT(GL_SEMAPHORE_INDEX_COUNT,pglSemaphore[i]);
+	delete []pglSemaphore;
 }
 
 void CompositorInterface::DestroyRenderEngine(){
@@ -733,6 +786,7 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 		renderQueue.push_back(renderObject);
 	}
 
+	//run GL part of the pipeline
 	VkCommandBufferBeginInfo commandBufferBeginInfo = {};
 	commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	commandBufferBeginInfo.flags = 0;
@@ -740,11 +794,12 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 		throw Exception("Failed to begin command buffer recording.");
 
 	/*std::vector<uint> semaphoreTextures;
+	std::vector<uint> srcLayouts;
 	for(ClientFrame *pclientFrame : updateQueue){
-		pclientFrame->UpdateContents(&pglCommandBuffers[currentFrame]);
-		semaphoreTextures.push_back(&);
+		semaphoreTextures.push_back(pclientFrame->ptexture->sharedTexture);
+		srcLayouts.push_back(GL_LAYOUT_COLOR_ATTACHMENT_EXT);
 	}
-	glWaitSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_READY],0,0,0,0,&src*/
+	glWaitSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_READY],0,0,semaphoreTextures.size(),semaphoreTextures.data(),srcLayouts.data());*/
 	//render
 	//glSignalSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_FINISHED,0,0,
 
@@ -936,7 +991,7 @@ Texture * CompositorInterface::CreateTexture(uint w, uint h){
 		textureCache.pop_back();
 		printf("----------- found cached texture\n");
 
-	}else ptexture = new Texture(w,h,VK_FORMAT_R8G8B8A8_UNORM,this);
+	}else ptexture = new Texture(w,h,this);
 
 	return ptexture;
 }
@@ -1030,9 +1085,13 @@ X11ClientFrame::X11ClientFrame(WManager::Container *pcontainer, const Backend::X
 	damage = xcb_generate_id(pbackend->pcon);
 	xcb_damage_create(pbackend->pcon,damage,window,XCB_DAMAGE_REPORT_LEVEL_RAW_RECTANGLES);
 	//xcb_damage_create(pbackend->pcon,damage,window,XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
+	
+	ptexture->Attach(windowPixmap);
 }
 
 X11ClientFrame::~X11ClientFrame(){
+	ptexture->Detach();
+
 	xcb_damage_destroy(pbackend->pcon,damage);
 	//
 	xcb_composite_unredirect_window(pbackend->pcon,window,XCB_COMPOSITE_REDIRECT_MANUAL);
@@ -1046,7 +1105,6 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 	/*struct timespec t1;
 	clock_gettime(CLOCK_MONOTONIC,&t1);*/
 
-	//TODO: can we acquire only the damaged regions?
 	xcb_get_image_cookie_t imageCookie = xcb_get_image_unchecked(pbackend->pcon,XCB_IMAGE_FORMAT_Z_PIXMAP,windowPixmap,0,0,rect.w,rect.h,~0);
 	xcb_get_image_reply_t *pimageReply = xcb_get_image_reply(pbackend->pcon,imageCookie,0);
 	if(!pimageReply){
@@ -1106,10 +1164,14 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 }
 
 void X11ClientFrame::AdjustSurface1(){
+	ptexture->Detach();
+
 	xcb_free_pixmap(pbackend->pcon,windowPixmap);
 	xcb_composite_name_window_pixmap(pbackend->pcon,window,windowPixmap);
 
 	AdjustSurface(rect.w,rect.h);
+
+	ptexture->Attach(windowPixmap);
 }
 
 X11Background::X11Background(xcb_pixmap_t _pixmap, uint _w, uint _h, const char *_pshaderName[Pipeline::SHADER_MODULE_COUNT], X11Compositor *_pcomp) : w(_w), h(_h), ClientFrame(_w,_h,_pshaderName,_pcomp), pcomp11(_pcomp), pixmap(_pixmap){
@@ -1155,7 +1217,6 @@ X11Compositor::~X11Compositor(){
 }
 
 void X11Compositor::Start(){
-
 	//compositor
 	if(!pbackend->QueryExtension("Composite",&compEventOffset,&compErrorOffset))
 		throw Exception("XCompositor unavailable.\n");
@@ -1214,17 +1275,14 @@ void X11Compositor::Start(){
 	xcb_flush(pbackend->pcon);
 
 	InitializeRenderEngine();
-
-	if(!(vkGetMemoryFdKHR = (PFN_vkGetMemoryFdKHR)vkGetInstanceProcAddr(instance,"vkGetMemoryFdKHR")) ||
-		!(vkGetSemaphoreFdKHR = (PFN_vkGetSemaphoreFdKHR)vkGetInstanceProcAddr(instance,"vkGetSemaphoreFdKHR")))
-		throw Exception("Unable to retrieve Vulkan extension procedure addresses.");
+	DebugPrintf(stdout,"Vulkan initialized.\n");
 
 	sint glxver = gladLoaderLoadGLX(pbackend->pdisplay,pbackend->defaultScreen);
 	if(glxver == 0)
 		throw Exception("Unable to load GLX.\n");
 	DebugPrintf(stdout,"Loaded GLX %d.%d\n",GLAD_VERSION_MAJOR(glxver),GLAD_VERSION_MINOR(glxver));
 
-	// Initialize GL interop, setup window to get the context
+	//Initialize GL interop, setup window to get the context
 	const sint visualAttributes[] = { 
 		GLX_DRAWABLE_TYPE,GLX_PIXMAP_BIT,
 		GLX_BIND_TO_TEXTURE_TARGETS_EXT,GLX_TEXTURE_2D_BIT_EXT,
@@ -1249,7 +1307,7 @@ void X11Compositor::Start(){
 	if(!pfbconfig || fbconfigCount == 0)
 		throw Exception("glXChooseFBConfig failed.\n");
 
-	int visualId;
+	sint visualId;
 	glXGetFBConfigAttrib(pbackend->pdisplay,pfbconfig[0],GLX_VISUAL_ID,&visualId);
 	
 	context = glXCreateNewContext(pbackend->pdisplay,pfbconfig[0],GLX_RGBA_TYPE,0,True);
@@ -1267,56 +1325,15 @@ void X11Compositor::Start(){
 	if(!glXMakeContextCurrent(pbackend->pdisplay,glxwindow,glxwindow,context))
 		throw Exception("Failed to set current GLX context.");
 	
-	sint glver = gladLoaderLoadGL();
-	if(glver == 0)
-		throw Exception("Unable to load GL.");
-	DebugPrintf(stdout,"Loaded GL %d.%d\n",GLAD_VERSION_MAJOR(glver),GLAD_VERSION_MINOR(glver));
-	
-	DebugPrintf(stdout,"Checking GL(X) extensions\n");
-	if(GLAD_GLX_EXT_texture_from_pixmap)
-		printf("EXT_texture_from_pixmap\n");
-	if(GLAD_GL_EXT_memory_object)
-		printf("EXT_memory_object\n");
-	if(GLAD_GL_EXT_memory_object_fd)
-		printf("EXT_memory_object_fd\n");
-	if(GLAD_GL_EXT_semaphore)
-		printf("EXT_semaphore\n");
-	if(GLAD_GL_EXT_semaphore_fd)
-		printf("EXT_semaphore_fd\n");
-	
-	pglSemaphore = new uint[swapChainImageCount][GL_SEMAPHORE_INDEX_COUNT];
-
-	//TODO: combine
-	for(uint i = 0; i < swapChainImageCount; ++i){
-		glGenSemaphoresEXT(GL_SEMAPHORE_INDEX_COUNT,pglSemaphore[i]);
-
-		VkSemaphoreGetFdInfoKHR semaphoreFdInfo = {};
-		semaphoreFdInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
-		semaphoreFdInfo.pNext = 0;
-		semaphoreFdInfo.semaphore = psemaphore[i][SEMAPHORE_INDEX_GL_READY];
-		semaphoreFdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
-
-		sint semaphorefd;
-		vkGetSemaphoreFdKHR(logicalDev,&semaphoreFdInfo,&semaphorefd);
-		glImportSemaphoreFdEXT(pglSemaphore[i][GL_SEMAPHORE_INDEX_READY],GL_HANDLE_TYPE_OPAQUE_FD_EXT,semaphorefd);
-		//
-		semaphoreFdInfo.semaphore = psemaphore[i][SEMAPHORE_INDEX_GL_FINISHED];
-
-		vkGetSemaphoreFdKHR(logicalDev,&semaphoreFdInfo,&semaphorefd);
-		glImportSemaphoreFdEXT(pglSemaphore[i][GL_SEMAPHORE_INDEX_FINISHED],GL_HANDLE_TYPE_OPAQUE_FD_EXT,semaphorefd);
-	}
-		
+	InitializeGLInterop();
 	DebugPrintf(stdout,"GL interop initialized.\n");
-	printf("* %s, OpenGL %s\n",glGetString(GL_RENDERER),glGetString(GL_VERSION));
 }
 
 void X11Compositor::Stop(){
 	if(pbackground)
 		delete pbackground;
 	
-	for(uint i = 0; i < swapChainImageCount; ++i)
-		glDeleteSemaphoresEXT(GL_SEMAPHORE_INDEX_COUNT,pglSemaphore[i]);
-	delete []pglSemaphore;
+	DestroyGLInterop();
 
 	glXDestroyWindow(pbackend->pdisplay,glxwindow);
 	xcb_destroy_window(pbackend->pcon,glcontextwin);
