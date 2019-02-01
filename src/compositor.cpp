@@ -607,7 +607,9 @@ void CompositorInterface::InitializeGLInterop(){
 	pglSemaphore = new uint[swapChainImageCount][GL_SEMAPHORE_INDEX_COUNT];
 
 	for(uint i = 0; i < swapChainImageCount; ++i){
-		glGenSemaphoresEXT(GL_SEMAPHORE_INDEX_COUNT,pglSemaphore[i]);
+		//glGenSemaphoresEXT(GL_SEMAPHORE_INDEX_COUNT,pglSemaphore[i]);
+		glGenSemaphoresEXT(1,&pglSemaphore[i][GL_SEMAPHORE_INDEX_READY]);
+		glGenSemaphoresEXT(1,&pglSemaphore[i][GL_SEMAPHORE_INDEX_FINISHED]);
 
 		VkSemaphoreGetFdInfoKHR semaphoreFdInfo = {};
 		semaphoreFdInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
@@ -794,14 +796,25 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 		throw Exception("Failed to begin command buffer recording.");
 
 	/*std::vector<uint> semaphoreTextures;
-	std::vector<uint> srcLayouts;
+	std::vector<uint> textureLayouts;
 	for(ClientFrame *pclientFrame : updateQueue){
 		semaphoreTextures.push_back(pclientFrame->ptexture->sharedTexture);
-		srcLayouts.push_back(GL_LAYOUT_COLOR_ATTACHMENT_EXT);
+		textureLayouts.push_back(GL_LAYOUT_COLOR_ATTACHMENT_EXT);
 	}
-	glWaitSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_READY],0,0,semaphoreTextures.size(),semaphoreTextures.data(),srcLayouts.data());*/
-	//render
-	//glSignalSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_FINISHED,0,0,
+	glWaitSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_READY],0,0,semaphoreTextures.size(),semaphoreTextures.data(),textureLayouts.data());*/
+	//glWaitSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_READY],0,0,0,0,0);
+
+	/*for(uint i = 0; i < updateQueue.size(); ++i){
+		updateQueue[i]->UpdateContents(&pglCommandBuffers[currentFrame]);
+		textureLayouts[i] = GL_LAYOUT_SHADER_READ_ONLY_EXT;
+	}*/
+	for(ClientFrame *pclientFrame : updateQueue)
+		pclientFrame->UpdateContents(&pglCommandBuffers[currentFrame]);
+	//updateQueue.clear(); ///////////////////
+
+	//glSignalSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_FINISHED],0,0,semaphoreTextures.size(),semaphoreTextures.data(),textureLayouts.data());
+	//glSignalSemaphoreEXT(pglSemaphore[currentFrame][GL_SEMAPHORE_INDEX_FINISHED],0,0,0,0,0);
+	glFlush();
 
 	if(vkEndCommandBuffer(pglCommandBuffers[currentFrame]) != VK_SUCCESS)
 		throw Exception("Failed to end command buffer recording.");
@@ -813,8 +826,8 @@ void CompositorInterface::GenerateCommandBuffers(const WManager::Container *proo
 	if(pbackground)
 		pbackground->UpdateContents(&pcopyCommandBuffers[currentFrame]);
 
-	for(ClientFrame *pclientFrame : updateQueue)
-		pclientFrame->UpdateContents(&pcopyCommandBuffers[currentFrame]);
+	//for(ClientFrame *pclientFrame : updateQueue)
+		//pclientFrame->UpdateContents(&pcopyCommandBuffers[currentFrame]);
 	updateQueue.clear();
 
 	if(vkEndCommandBuffer(pcopyCommandBuffers[currentFrame]) != VK_SUCCESS)
@@ -912,9 +925,11 @@ void CompositorInterface::Present(){
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &psemaphore[currentFrame][SEMAPHORE_INDEX_GL_READY];
 	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &pcopyCommandBuffers[currentFrame];
-	/*if(vkQueueSubmit(queue[QUEUE_INDEX_GRAPHICS],1,&submitInfo,0) != VK_SUCCESS)
-		throw Exception("Failed to submit a queue.");*/
+	submitInfo.pCommandBuffers = &pglCommandBuffers[currentFrame];
+	if(vkQueueSubmit(queue[QUEUE_INDEX_GRAPHICS],1,&submitInfo,0) != VK_SUCCESS)
+		throw Exception("Failed to submit a queue.");
+	
+	WaitIdle();
 
 	submitInfo.waitSemaphoreCount = 0;
 	submitInfo.signalSemaphoreCount = 0;
@@ -945,6 +960,8 @@ void CompositorInterface::Present(){
 	currentFrame = (currentFrame+1)%swapChainImageCount;
 
 	frameTag++;
+
+	WaitIdle();
 }
 
 Pipeline * CompositorInterface::LoadPipeline(const char *pshaderName[Pipeline::SHADER_MODULE_COUNT]){
@@ -1085,7 +1102,8 @@ X11ClientFrame::X11ClientFrame(WManager::Container *pcontainer, const Backend::X
 	damage = xcb_generate_id(pbackend->pcon);
 	xcb_damage_create(pbackend->pcon,damage,window,XCB_DAMAGE_REPORT_LEVEL_RAW_RECTANGLES);
 	//xcb_damage_create(pbackend->pcon,damage,window,XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
-	
+
+	xcb_flush(pbackend->pcon);
 	ptexture->Attach(windowPixmap);
 }
 
@@ -1101,7 +1119,11 @@ X11ClientFrame::~X11ClientFrame(){
 void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 	if(!fullRegionUpdate && damageRegions.size() == 0)
 		return;
-	
+
+#if 1
+	ptexture->Update(pcommandBuffer);
+	damageRegions.clear();
+#else
 	/*struct timespec t1;
 	clock_gettime(CLOCK_MONOTONIC,&t1);*/
 
@@ -1161,6 +1183,7 @@ void X11ClientFrame::UpdateContents(const VkCommandBuffer *pcommandBuffer){
 	damageRegions.clear();
 
 	free(pimageReply);
+#endif
 }
 
 void X11ClientFrame::AdjustSurface1(){
@@ -1171,6 +1194,7 @@ void X11ClientFrame::AdjustSurface1(){
 
 	AdjustSurface(rect.w,rect.h);
 
+	xcb_flush(pbackend->pcon);
 	ptexture->Attach(windowPixmap);
 }
 
@@ -1283,12 +1307,12 @@ void X11Compositor::Start(){
 	DebugPrintf(stdout,"Loaded GLX %d.%d\n",GLAD_VERSION_MAJOR(glxver),GLAD_VERSION_MINOR(glxver));
 
 	//Initialize GL interop, setup window to get the context
-	const sint visualAttributes[] = { 
+	/*const sint visualAttributes[] = { 
 		GLX_DRAWABLE_TYPE,GLX_PIXMAP_BIT,
 		GLX_BIND_TO_TEXTURE_TARGETS_EXT,GLX_TEXTURE_2D_BIT_EXT,
 		GLX_BIND_TO_TEXTURE_RGBA_EXT,True,
-		GLX_BIND_TO_TEXTURE_RGB_EXT,True,
-		GLX_Y_INVERTED_EXT,True,
+		//GLX_BIND_TO_TEXTURE_RGB_EXT,True,
+		GLX_Y_INVERTED_EXT,(int)GLX_DONT_CARE,
 		//GLX_X_RENDERABLE,True,
 		//GLX_DRAWABLE_TYPE,GLX_WINDOW_BIT,
 		//GLX_RENDER_TYPE,GLX_RGBA_BIT,
@@ -1299,18 +1323,32 @@ void X11Compositor::Start(){
 		//GLX_ALPHA_SIZE,8,
 		//GLX_DEPTH_SIZE,24,
 		//GLX_STENCIL_SIZE,8,
-		//GLX_DOUBLEBUFFER,True,
+		GLX_DOUBLEBUFFER,(int)GLX_DONT_CARE,
+		None
+	};*/
+	const sint visualAttributes[] = {
+		GLX_BIND_TO_TEXTURE_RGBA_EXT, True,
+		GLX_DRAWABLE_TYPE, GLX_PIXMAP_BIT,
+		GLX_BIND_TO_TEXTURE_TARGETS_EXT, GLX_TEXTURE_2D_BIT_EXT,
+		GLX_DOUBLEBUFFER, False,
+		GLX_Y_INVERTED_EXT, (int)GLX_DONT_CARE,
 		None
 	};
+	
+	sint attr[] = {GLX_RGBA,GLX_DEPTH_SIZE,24,GLX_DOUBLEBUFFER,None}; //
+	XVisualInfo *pvi = glXChooseVisual(pbackend->pdisplay,0,attr); //testing only
+
 	sint fbconfigCount;
-	pfbconfig = glXChooseFBConfig(pbackend->pdisplay,pbackend->defaultScreen,visualAttributes,&fbconfigCount);
+
+	pfbconfig = glXChooseFBConfig(pbackend->pdisplay,0,visualAttributes,&fbconfigCount);
 	if(!pfbconfig || fbconfigCount == 0)
 		throw Exception("glXChooseFBConfig failed.\n");
 
-	sint visualId;
+	/*sint visualId;
 	glXGetFBConfigAttrib(pbackend->pdisplay,pfbconfig[0],GLX_VISUAL_ID,&visualId);
 	
-	context = glXCreateNewContext(pbackend->pdisplay,pfbconfig[0],GLX_RGBA_TYPE,0,True);
+	//context = glXCreateNewContext(pbackend->pdisplay,pfbconfig[0],GLX_RGBA_TYPE,0,True);
+	//context = glXCreateContext(pbackend->pdisplay,pvi,0,GL_TRUE);
 
 	glcontextwin = xcb_generate_id(pbackend->pcon);
 	//mask and values from above
@@ -1320,13 +1358,55 @@ void X11Compositor::Start(){
 
 	values[0] = XCB_STACK_MODE_BELOW;
 	xcb_configure_window(pbackend->pcon,glcontextwin,XCB_CONFIG_WINDOW_STACK_MODE,values);
+	xcb_flush(pbackend->pcon);*/
 
-	glxwindow = glXCreateWindow(pbackend->pdisplay,pfbconfig[0],glcontextwin,0);
+	/// ------------------------------------
+	Display *dpy = pbackend->pdisplay;
+	XSetWindowAttributes swa;
+	swa.event_mask = ExposureMask|KeyPressMask;
+    swa.colormap = XCreateColormap(dpy,pbackend->pscr->root,pvi->visual,AllocNone);
+
+    glxwindow = XCreateWindow(dpy,pbackend->pscr->root,0,0,10,10,0,pvi->depth,InputOutput,pvi->visual,CWEventMask|CWColormap,&swa);
+    XMapWindow(dpy,glxwindow);
+
+	context = glXCreateContext(pbackend->pdisplay,pvi,0,GL_TRUE); //!! testing only
+	/// ------------------------------------
+	//glxwindow = glXCreateWindow(pbackend->pdisplay,pfbconfig[0],glcontextwin,0);
 	if(!glXMakeContextCurrent(pbackend->pdisplay,glxwindow,glxwindow,context))
 		throw Exception("Failed to set current GLX context.");
 	
 	InitializeGLInterop();
 	DebugPrintf(stdout,"GL interop initialized.\n");
+
+	//test ------------------------
+	/*xcb_pixmap_t pixmap = XCreatePixmap(dpy, pbackend->pscr->root, 1280, 720, 24);//vi->depth);
+    GC gc = DefaultGC(dpy, 0);
+
+    XSetForeground(dpy, gc, 0x00c0c0);
+    XFillRectangle(dpy, pixmap, gc, 0, 0, 1280, 720);
+
+    XSetForeground(dpy, gc, 0x000000);
+    XFillArc(dpy, pixmap, gc, 15, 25, 50, 50, 0, 360*64);
+
+    XSetForeground(dpy, gc, 0x0000ff);
+    XDrawString(dpy, pixmap, gc, 10, 15, "PIXMAP TO TEXTURE", strlen("PIXMAP TO TEXTURE"));
+
+    XSetForeground(dpy, gc, 0xff0000);
+    XFillRectangle(dpy, pixmap, gc, 75, 75, 45, 35);
+
+	static const sint pixmapAttribs[] = {
+		GLX_TEXTURE_TARGET_EXT,GLX_TEXTURE_2D_EXT,
+		GLX_TEXTURE_FORMAT_EXT,GLX_TEXTURE_FORMAT_RGBA_EXT,
+		None};
+	unsigned long int glxpixmap = glXCreatePixmap(pbackend->pdisplay,pfbconfig[0],pixmap,pixmapAttribs);
+
+	GLuint texture_id;
+	glGenTextures(1, &texture_id);
+    glBindTexture(GL_TEXTURE_2D, texture_id);
+    glXBindTexImageEXT(dpy, glxpixmap, GLX_FRONT_EXT, NULL);
+
+    XFlush(dpy);*/
+	///// -----------------
 }
 
 void X11Compositor::Stop(){
@@ -1339,6 +1419,7 @@ void X11Compositor::Stop(){
 	xcb_destroy_window(pbackend->pcon,glcontextwin);
 
 	glXDestroyContext(pbackend->pdisplay,context);
+	XFree(pfbconfig);
 
 	gladLoaderUnloadGLX();
 	

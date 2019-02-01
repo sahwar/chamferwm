@@ -181,16 +181,17 @@ void TextureStaged::Unmap(const VkCommandBuffer *pcommandBuffer, const VkRect2D 
 	imageLayout = imageMemoryBarrier.newLayout;
 }
 
-TexturePixmap::TexturePixmap(uint _w, uint _h, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomp){
+TexturePixmap::TexturePixmap(uint _w, uint _h, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomp), glxpixmap(0){
 	pcomp11 = dynamic_cast<const X11Compositor *>(pcomp);
 	if(!pcomp11 || !pcomp11->pbackend->pdisplay) //hack, solve this!
 		return;
 	//
+	//https://lists.freedesktop.org/archives/piglit/2017-December/023561.html
 	VkMemoryGetFdInfoKHR memoryfdInfo = {};
 	memoryfdInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
 	memoryfdInfo.pNext = 0;
 	memoryfdInfo.memory = deviceMemory;
-	memoryfdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+	memoryfdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
 	
 	sint memoryfd;
 	if(pcomp->vkGetMemoryFdKHR(pcomp->logicalDev,&memoryfdInfo,&memoryfd) != VK_SUCCESS)
@@ -224,7 +225,9 @@ void TexturePixmap::Attach(xcb_pixmap_t pixmap){
 		GLX_TEXTURE_TARGET_EXT,GLX_TEXTURE_2D_EXT,
 		GLX_TEXTURE_FORMAT_EXT,GLX_TEXTURE_FORMAT_RGBA_EXT,
 		None};
+
 	glxpixmap = glXCreatePixmap(pcomp11->pbackend->pdisplay,pcomp11->pfbconfig[0],pixmap,pixmapAttribs);
+	DebugPrintf(stdout,"attached! %d\n",glxpixmap);
 }
 
 void TexturePixmap::Detach(){
@@ -254,14 +257,16 @@ void TexturePixmap::Update(const VkCommandBuffer *pcommandBuffer){
 	vkCmdPipelineBarrier(*pcommandBuffer,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,0,
 		0,0,0,0,1,&imageMemoryBarrier);
 
-	glBindTexture(GL_TEXTURE_2D,pixmapTexture);
+	//glBindTexture(GL_TEXTURE_2D,pixmapTexture);
 
-	glXBindTexImageEXT(pcomp11->pbackend->pdisplay,glxpixmap,GLX_FRONT_LEFT_EXT,0);
-	glCopyImageSubData(pixmapTexture,GL_TEXTURE_2D,0,0,0,0,
-		sharedTexture,GL_TEXTURE_2D,0,0,0,0,w,h,1); //TODO: damaged regions
-	glXReleaseTexImageEXT(pcomp11->pbackend->pdisplay,glxpixmap,GLX_FRONT_LEFT_EXT);
+	//glXBindTexImageEXT(pcomp11->pbackend->pdisplay,glxpixmap,GLX_FRONT_EXT,0);
+	//glCopyImageSubData(pixmapTexture,GL_TEXTURE_2D,0,0,0,0,
+	//	sharedTexture,GL_TEXTURE_2D,0,0,0,0,w,h,1); //TODO: damaged regions
+	//glXReleaseTexImageEXT(pcomp11->pbackend->pdisplay,glxpixmap,GLX_FRONT_EXT);
+	unsigned char one[] = {255,255,255,255};
+	glClearTexImage(sharedTexture,0,GL_RGBA8,GL_UNSIGNED_BYTE,&one);
 
-	//semaphore mandatory
+	imageLayout = imageMemoryBarrier.newLayout;
 }
 
 Texture::Texture(uint _w, uint _h, const CompositorInterface *_pcomp) : TextureBase(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomp), TextureStaged(_w,_h,VK_FORMAT_R8G8B8A8_UNORM,_pcomp), TexturePixmap(_w,_h,_pcomp){
